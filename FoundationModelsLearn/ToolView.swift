@@ -23,11 +23,7 @@ struct ToolView: View {
             
             Button("Ask") {
                 Task {
-                    do {
-                        response = try await calculateTip() ?? ""
-                    } catch {
-                        response = "Error:\(error.localizedDescription)"
-                    }
+                    response = await calculateTip() ?? ""
                 }
             }
             .disabled(session?.isResponding == true)
@@ -46,14 +42,46 @@ struct ToolView: View {
         .padding(.horizontal)
     }
     
-    private func calculateTip() async throws -> String? {
-        let instructions = """
-            You are a helpful tip calculator assistant. When asked to calculate tips, 
-            Use the TipCalculatorTool for performing tip calculations.
-        """
-        session = LanguageModelSession(tools: [TipCalculatorTool()], instructions: instructions)
-        let response = try await session?.respond(to: prompt)
-        return response?.content
+    private func calculateTip() async  -> String? {
+        do {
+            let instructions = """
+                You are a helpful tip calculator assistant. When asked to calculate tips, 
+                Use the TipCalculatorTool for performing tip calculations.
+            """
+            session = LanguageModelSession(tools: [TipCalculatorTool()], instructions: instructions)
+            let response = try await session?.respond(to: prompt)
+            return response?.content
+        }  catch LanguageModelSession.GenerationError.exceededContextWindowSize {
+            response = "This conversation is too long. Please start a new session"
+        } catch LanguageModelSession.GenerationError.guardrailViolation {
+            response = "I cannot respond to that request"
+        } catch LanguageModelSession.GenerationError.assetsUnavailable{
+            response = "Foundation Model is temporarily unavailable. Please try again"
+        } catch LanguageModelSession.GenerationError.concurrentRequests {
+            response = "Please wait for the current request to finish before starting a new one."
+        } catch LanguageModelSession.GenerationError.rateLimited {
+            response = "Too many requests. Please try again later"
+        } catch LanguageModelSession.GenerationError.unsupportedLanguageOrLocale {
+            response = "This language is not supported. Plese try English or another supported language"
+        } catch LanguageModelSession.GenerationError.decodingFailure {
+            response = "Unable to process the response. Please try again"
+        } catch LanguageModelSession.GenerationError.unsupportedGuide {
+            response = "Invalid generation parametere, Please check your request format"
+        } catch LanguageModelSession.GenerationError.refusal(let refusal, _) {
+            do {
+                let explanationContent = try await Task.detached {
+                    let explanation = try await refusal.explanation
+                    return explanation.content
+                }.value
+                response = "The model declined to respond: \(explanationContent)"
+            } catch {
+                response = "The model declined to this request"
+            }
+        }
+        catch {
+            response = "Error: \(error.localizedDescription)"
+        }
+        return response
     }
 }
 

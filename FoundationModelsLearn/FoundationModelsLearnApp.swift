@@ -11,7 +11,7 @@ import SwiftUI
 struct FoundationModelsLearnApp: App {
     var body: some Scene {
         WindowGroup {
-            ToolView()
+            BoxView()
         }
     }
 }
