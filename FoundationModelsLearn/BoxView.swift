@@ -31,6 +31,8 @@ struct BoxView: View {
 class BoxViewModel: ObservableObject {
     @Published var message: String = ""
     @Published var isListening: Bool = false
+    @Published var showProgress: Bool = false
+    @Published var wordCount: Int = 0
 
     private let speechRecognizer = SpeechRecognizer()
     private var cancellables = Set<AnyCancellable>()
@@ -41,18 +43,36 @@ class BoxViewModel: ObservableObject {
 
         // Bind speech recognizer's isListening to our isListening
         speechRecognizer.$isListening
-            .assign(to: \.isListening, on: self)
+            .sink { [weak self] listening in
+                self?.isListening = listening
+                self?.showProgress = listening
+                if !listening {
+                    self?.wordCount = 0
+                }
+            }
             .store(in: &cancellables)
 
         // Update message with transcript
         speechRecognizer.$transcript
             .sink { [weak self] transcript in
+                guard let self = self else { return }
+
                 if !transcript.isEmpty {
-                    self?.message = transcript
-                } else if self?.isListening == true {
-                    self?.message = "Listening..."
+                    let words = transcript.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
+                    self.wordCount = words.count
+
+                    if self.wordCount >= 4 {
+                        self.message = transcript
+                        self.showProgress = false
+                    } else if self.isListening {
+                        self.message = "Listening..."
+                    }
+                } else if self.isListening {
+                    self.message = "Listening..."
+                    self.wordCount = 0
                 } else {
-                    self?.message = ""
+                    self.message = ""
+                    self.wordCount = 0
                 }
             }
             .store(in: &cancellables)
@@ -82,10 +102,13 @@ class BoxViewModel: ObservableObject {
 // MARK: - Chat Input Container
 struct ChatInputContainer: View {
     @ObservedObject var viewModel: BoxViewModel
-    
+
     var body: some View {
         VStack(spacing: 12) {
-            MessageTextField(message: $viewModel.message)
+            MessageTextField(
+                message: $viewModel.message,
+                showProgress: viewModel.showProgress
+            )
             ActionButtonsRow(viewModel: viewModel)
         }
         .padding(.vertical, 16)
@@ -97,12 +120,23 @@ struct ChatInputContainer: View {
 // MARK: - Message Text Field
 struct MessageTextField: View {
     @Binding var message: String
-    
+    let showProgress: Bool
+
     var body: some View {
-        TextField("Ask about BusinessName", text: $message)
-            .padding(.vertical, 12)
-            .padding(.horizontal, 16)
-            .background(Color.clear)
+        HStack {
+            if showProgress {
+                ListeningProgressView()
+                    .transition(.opacity)
+                Spacer()
+            } else {
+                TextField("Ask anything", text: $message, axis: .vertical)
+                    .transition(.opacity)
+            }
+        }
+        .padding(.vertical, 12)
+        .padding(.horizontal, 16)
+        .background(Color.clear)
+        .animation(.easeInOut(duration: 0.3), value: showProgress)
     }
 }
 
@@ -268,6 +302,21 @@ struct MicrophoneIcon: View {
         Image(systemName: "mic")
             .font(.title2)
             .foregroundColor(.gray)
+    }
+}
+
+// MARK: - Listening Progress View
+struct ListeningProgressView: View {
+    var body: some View {
+        HStack(spacing: 8) {
+            ProgressView()
+                .scaleEffect(0.8)
+                .progressViewStyle(CircularProgressViewStyle(tint: .blue))
+
+            Text("Listening...")
+                .foregroundColor(.blue)
+                .font(.body)
+        }
     }
 }
 
