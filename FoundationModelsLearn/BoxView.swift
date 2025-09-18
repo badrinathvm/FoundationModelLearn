@@ -33,6 +33,7 @@ class BoxViewModel: ObservableObject {
     @Published var isListening: Bool = false
     @Published var showProgress: Bool = false
     @Published var wordCount: Int = 0
+    @Published var showSendButton: Bool = false
 
     private let speechRecognizer = SpeechRecognizer()
     private var cancellables = Set<AnyCancellable>()
@@ -46,8 +47,13 @@ class BoxViewModel: ObservableObject {
             .sink { [weak self] listening in
                 self?.isListening = listening
                 self?.showProgress = listening
+                
                 if !listening {
-                    self?.wordCount = 0
+                    // When listening stops, check if we have meaningful content
+                    self?.checkAndShowSendButton()
+                } else {
+                    // Hide send button when starting to listen
+                    self?.showSendButton = false
                 }
             }
             .store(in: &cancellables)
@@ -62,20 +68,44 @@ class BoxViewModel: ObservableObject {
                     self.wordCount = words.count
 
                     if self.wordCount >= 4 {
+                        // We have enough words, update the message
                         self.message = transcript
                         self.showProgress = false
+                        
+                        // If not currently listening, show send button
+                        if !self.isListening {
+                            self.showSendButton = true
+                        }
                     } else if self.isListening {
                         self.message = "Listening..."
                     }
-                } else if self.isListening {
-                    self.message = "Listening..."
-                    self.wordCount = 0
                 } else {
-                    self.message = ""
-                    self.wordCount = 0
+                    // Empty transcript
+                    if self.isListening {
+                        self.message = "Listening..."
+                        self.wordCount = 0
+                    } else {
+                        // Not listening and no transcript
+                        self.message = ""
+                        self.wordCount = 0
+                        self.showSendButton = false
+                    }
                 }
             }
             .store(in: &cancellables)
+    }
+    
+    private func checkAndShowSendButton() {
+        // Check if we should show send button when listening stops
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            guard let self = self else { return }
+            
+            let hasValidMessage = !self.message.isEmpty &&
+                                 self.message != "Listening..." &&
+                                 self.wordCount >= 4
+            
+            self.showSendButton = hasValidMessage
+        }
     }
 
     func toggleListening() {
@@ -83,6 +113,9 @@ class BoxViewModel: ObservableObject {
             if isListening {
                 speechRecognizer.stopRecording()
             } else {
+                // Clear previous state when starting new recording
+                speechRecognizer.clearTranscript()
+                showSendButton = false
                 speechRecognizer.startRecording()
             }
         } else {
@@ -96,6 +129,16 @@ class BoxViewModel: ObservableObject {
 
     func waveformButtonTapped() {
         // Handle waveform action
+    }
+
+    func sendMessage() {
+        // Handle sending the message
+        print("Sending message: \(message)")
+        // Reset after sending
+        message = ""
+        showSendButton = false
+        wordCount = 0
+        speechRecognizer.clearTranscript()
     }
 }
 
@@ -154,16 +197,23 @@ struct ActionButtonsRow: View {
             Spacer()
             
             HStack(spacing: 16) {
-                PulsingMicrophoneButton(
-                    isListening: viewModel.isListening,
-                    action: viewModel.toggleListening
-                )
-                
+                if viewModel.showSendButton {
+                    SendButton(action: viewModel.sendMessage)
+                        .transition(.scale.combined(with: .opacity))
+                } else {
+                    PulsingMicrophoneButton(
+                        isListening: viewModel.isListening,
+                        action: viewModel.toggleListening
+                    )
+                    .transition(.scale.combined(with: .opacity))
+                }
+
                 ActionButton(
                     systemName: "waveform",
                     action: viewModel.waveformButtonTapped
                 )
             }
+            .animation(.easeInOut(duration: 0.3), value: viewModel.showSendButton)
         }
         .padding(.horizontal, 16)
     }
@@ -305,6 +355,37 @@ struct MicrophoneIcon: View {
     }
 }
 
+// MARK: - Send Button
+struct SendButton: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "paperplane")
+                .font(.title2)
+                .foregroundColor(.blue)
+                .rotationEffect(.degrees(45))
+                .frame(width: 44, height: 44)
+                .background(Color.white)
+                .overlay(
+                    Circle()
+                        .strokeBorder(
+                            LinearGradient(
+                                gradient: Gradient(colors: [
+                                    Color.blue,
+                                    Color.cyan,
+                                    Color.green
+                                ]),
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            ),
+                            lineWidth: 2
+                        )
+                )
+        }
+    }
+}
+
 // MARK: - Listening Progress View
 struct ListeningProgressView: View {
     var body: some View {
@@ -339,7 +420,6 @@ struct GradientBorder: View {
     }
 }
 
-
 @MainActor
 class SpeechRecognizer: ObservableObject {
     @Published var transcript = ""
@@ -347,7 +427,7 @@ class SpeechRecognizer: ObservableObject {
     @Published var currentAmplitude: Double = 0.0
     @Published var authorizationStatus: SFSpeechRecognizerAuthorizationStatus = .notDetermined
     
-    private let speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US")) // Change this identifier for different languages
+    private let speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
     private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
     private let audioEngine = AVAudioEngine()
@@ -362,92 +442,64 @@ class SpeechRecognizer: ObservableObject {
     }
     
     func requestPermissions() {
-        // Request speech recognition permission
         SFSpeechRecognizer.requestAuthorization { status in
             DispatchQueue.main.async {
                 self.authorizationStatus = status
             }
         }
         
-        // Request microphone permission
         AVAudioSession.sharedInstance().requestRecordPermission { _ in }
     }
     
     func startRecording() {
-        // STEP 1: Clean up any previous recording session
-        // Cancel any existing recognition task to avoid conflicts
         recognitionTask?.cancel()
         recognitionTask = nil
         
-        // STEP 2: Configure the audio session for recording
-        // This tells iOS how we want to use the audio system
         let audioSession = AVAudioSession.sharedInstance()
         do {
-            // .record: We want to record audio
-            // .measurement: High-quality recording mode for speech recognition
-            // .duckOthers: Lower other app volumes while recording
             try audioSession.setCategory(.record, mode: .measurement, options: .duckOthers)
-            
-            // Activate the audio session (start using microphone)
-            // .notifyOthersOnDeactivation: Tell other apps when we're done
             try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
         } catch {
             print("Audio session configuration error: \(error)")
             return
         }
         
-        // STEP 3: Create a speech recognition request
-        // This object will receive audio data and convert it to text
         recognitionRequest = SFSpeechAudioBufferRecognitionRequest()
         guard let recognitionRequest = recognitionRequest else {
             print("Unable to create recognition request")
             return
         }
         
-        // Enable live results - we get text updates as the user speaks
-        // (not just at the end of recording)
         recognitionRequest.shouldReportPartialResults = true
         
-        // STEP 4: Set up the audio engine to capture microphone input
-        let inputNode = audioEngine.inputNode  // Device's microphone
-        let recordingFormat = inputNode.outputFormat(forBus: 0)  // Audio format from mic
+        let inputNode = audioEngine.inputNode
+        let recordingFormat = inputNode.outputFormat(forBus: 0)
         
-        // Install a "tap" on the audio input - this captures audio data
-        // bufferSize: 1024 samples at a time (good balance of latency vs processing)
         inputNode.installTap(onBus: 0, bufferSize: 1024, format: recordingFormat) { buffer, _ in
-            // Every time we get audio data, send it to speech recognition
             recognitionRequest.append(buffer)
             
-            // Calculate amplitude for wave animation
             let amplitude = self.calculateAmplitude(from: buffer)
             DispatchQueue.main.async {
                 self.currentAmplitude = amplitude
             }
         }
         
-        // STEP 5: Start the audio engine
-        audioEngine.prepare()  // Get ready to record
+        audioEngine.prepare()
         
         do {
-            try audioEngine.start()  // Begin capturing microphone audio
-            isListening = true       // Update UI state
+            try audioEngine.start()
+            isListening = true
         } catch {
             print("Audio engine start error: \(error)")
             return
         }
         
-        // STEP 6: Start the speech recognition task
-        // This processes the audio data and converts it to text
         recognitionTask = speechRecognizer?.recognitionTask(with: recognitionRequest) { result, error in
-            // This closure runs every time we get speech recognition results
             DispatchQueue.main.async {
                 if let result = result {
-                    // Update the transcript with the latest recognized text
-                    // bestTranscription gives us the most confident result
                     self.transcript = result.bestTranscription.formattedString
                 }
                 
-                // Stop recording if there's an error or speech recognition is complete
                 if error != nil || result?.isFinal == true {
                     self.stopRecording()
                 }
@@ -456,32 +508,18 @@ class SpeechRecognizer: ObservableObject {
     }
     
     func stopRecording() {
-        // STEP 1: Stop the audio engine
-        // Stop capturing audio from the microphone
         audioEngine.stop()
-        
-        // Remove the "tap" we installed on the microphone input
-        // This stops the flow of audio data to speech recognition
         audioEngine.inputNode.removeTap(onBus: 0)
         
-        // STEP 2: Clean up speech recognition
-        // Tell the recognition request that no more audio is coming
         recognitionRequest?.endAudio()
-        
-        // Cancel the recognition task to stop processing
         recognitionTask?.cancel()
         
-        // STEP 3: Clear our references to avoid memory leaks
         recognitionRequest = nil
         recognitionTask = nil
         
-        // STEP 4: Update UI state
-        isListening = false  // Hide "recording" indicator
-        currentAmplitude = 0.0  // Reset amplitude for wave animation
+        isListening = false
+        currentAmplitude = 0.0
         
-        // STEP 5: Deactivate the audio session
-        // This tells iOS we're done using the microphone
-        // and allows other apps to use audio again
         do {
             try AVAudioSession.sharedInstance().setActive(false)
         } catch {
@@ -493,23 +531,21 @@ class SpeechRecognizer: ObservableObject {
         transcript = ""
     }
     
-    // Calculate amplitude from audio buffer for wave animation
     private func calculateAmplitude(from buffer: AVAudioPCMBuffer) -> Double {
         guard let channelData = buffer.floatChannelData?[0] else { return 0.0 }
         
         let frames = buffer.frameLength
         var sum: Float = 0.0
         
-        // Calculate RMS (Root Mean Square) for amplitude
         for i in 0..<Int(frames) {
             let sample = channelData[i]
             sum += sample * sample
         }
         
         let rms = sqrt(sum / Float(frames))
-        let amplitude = Double(rms) * 10 // Scale for better visualization
+        let amplitude = Double(rms) * 10
         
-        return min(max(amplitude, 0.0), 1.0) // Clamp between 0 and 1
+        return min(max(amplitude, 0.0), 1.0)
     }
 }
 
