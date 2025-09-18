@@ -28,6 +28,7 @@ struct BoxView: View {
 }
 
 // MARK: - View Model
+
 class BoxViewModel: ObservableObject {
     @Published var message: String = ""
     @Published var isListening: Bool = false
@@ -38,91 +39,6 @@ class BoxViewModel: ObservableObject {
     private let speechRecognizer = SpeechRecognizer()
     private var cancellables = Set<AnyCancellable>()
 
-    init() {
-        // Request permissions on initialization
-        speechRecognizer.requestPermissions()
-
-        // Bind speech recognizer's isListening to our isListening
-        speechRecognizer.$isListening
-            .sink { [weak self] listening in
-                self?.isListening = listening
-                self?.showProgress = listening
-                
-                if !listening {
-                    // When listening stops, check if we have meaningful content
-                    self?.checkAndShowSendButton()
-                } else {
-                    // Hide send button when starting to listen
-                    self?.showSendButton = false
-                }
-            }
-            .store(in: &cancellables)
-
-        // Update message with transcript
-        speechRecognizer.$transcript
-            .sink { [weak self] transcript in
-                guard let self = self else { return }
-
-                if !transcript.isEmpty {
-                    let words = transcript.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
-                    self.wordCount = words.count
-
-                    if self.wordCount >= 4 {
-                        // We have enough words, update the message
-                        self.message = transcript
-                        self.showProgress = false
-                        
-                        // If not currently listening, show send button
-                        if !self.isListening {
-                            self.showSendButton = true
-                        }
-                    } else if self.isListening {
-                        self.message = "Listening..."
-                    }
-                } else {
-                    // Empty transcript
-                    if self.isListening {
-                        self.message = "Listening..."
-                        self.wordCount = 0
-                    } else {
-                        // Not listening and no transcript
-                        self.message = ""
-                        self.wordCount = 0
-                        self.showSendButton = false
-                    }
-                }
-            }
-            .store(in: &cancellables)
-    }
-    
-    private func checkAndShowSendButton() {
-        // Check if we should show send button when listening stops
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
-            guard let self = self else { return }
-            
-            let hasValidMessage = !self.message.isEmpty &&
-                                 self.message != "Listening..." &&
-                                 self.wordCount >= 4
-            
-            self.showSendButton = hasValidMessage
-        }
-    }
-
-    func toggleListening() {
-        if speechRecognizer.isAuthorized {
-            if isListening {
-                speechRecognizer.stopRecording()
-            } else {
-                // Clear previous state when starting new recording
-                speechRecognizer.clearTranscript()
-                showSendButton = false
-                speechRecognizer.startRecording()
-            }
-        } else {
-            speechRecognizer.requestPermissions()
-        }
-    }
-
     func addButtonTapped() {
         // Handle add action
     }
@@ -131,16 +47,127 @@ class BoxViewModel: ObservableObject {
         // Handle waveform action
     }
 
-    func sendMessage() {
-        // Handle sending the message
-        print("Sending message: \(message)")
-        // Reset after sending
+    
+    init() {
+        speechRecognizer.requestPermissions()
+
+        // FIXED: Better listening state management
+        speechRecognizer.$isListening
+            .sink { [weak self] listening in
+                DispatchQueue.main.async {
+                    self?.isListening = listening
+                    self?.showProgress = listening
+                    
+                    if !listening {
+                        // When listening stops, check for send button after a delay
+                        self?.checkAndShowSendButton()
+                    } else {
+                        // When starting to listen, hide send button immediately
+                        self?.showSendButton = false
+                    }
+                }
+            }
+            .store(in: &cancellables)
+
+        // FIXED: Better transcript handling
+        speechRecognizer.$transcript
+            .removeDuplicates() // Prevent duplicate updates
+            .sink { [weak self] transcript in
+                DispatchQueue.main.async {
+                    self?.handleTranscriptUpdate(transcript)
+                }
+            }
+            .store(in: &cancellables)
+    }
+    
+    // FIXED: Separate method to handle transcript updates
+    private func handleTranscriptUpdate(_ transcript: String) {
+        print("📝 Transcript update: '\(transcript)', isListening: \(isListening)")
+        
+        if !transcript.isEmpty {
+            let words = transcript.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
+            self.wordCount = words.count
+            
+            if self.wordCount >= 4 {
+                self.message = transcript
+                self.showProgress = false
+                
+                // FIXED: Only show send button if we're not currently listening
+                if !self.isListening {
+                    print("✅ Showing send button - words: \(wordCount), not listening")
+                    self.showSendButton = true
+                }
+            } else if self.isListening {
+                self.message = "Listening..."
+            }
+        } else {
+            // Empty transcript
+            if self.isListening {
+                self.message = "Listening..."
+                self.wordCount = 0
+            } else {
+                self.resetToInitialState()
+            }
+        }
+    }
+    
+    // FIXED: Better method for checking send button
+    private func checkAndShowSendButton() {
+        print("🔍 Checking send button - message: '\(message)', wordCount: \(wordCount), isListening: \(isListening)")
+        
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            guard let self = self else { return }
+            
+            let hasValidMessage = !self.message.isEmpty &&
+                                 self.message != "Listening..." &&
+                                 self.wordCount >= 4 &&
+                                 !self.isListening // Make sure we're not listening
+            
+            print("📤 Send button decision: \(hasValidMessage)")
+            self.showSendButton = hasValidMessage
+        }
+    }
+    
+    // FIXED: Complete state reset
+    private func resetToInitialState() {
+        print("🔄 Resetting to initial state")
         message = ""
-        showSendButton = false
         wordCount = 0
+        showSendButton = false
+        showProgress = false
+    }
+
+    func toggleListening() {
+        print("🎤 Toggle listening - current state: \(isListening)")
+        
+        if speechRecognizer.isAuthorized {
+            if isListening {
+                print("🛑 Stopping recording")
+                speechRecognizer.stopRecording()
+            } else {
+                print("▶️ Starting recording")
+                // FIXED: Complete reset before starting new recording
+                resetToInitialState()
+                speechRecognizer.clearTranscript()
+                speechRecognizer.startRecording()
+            }
+        } else {
+            speechRecognizer.requestPermissions()
+        }
+    }
+
+    func sendMessage() {
+        print("📨 Sending message: \(message)")
+        
+        // FIXED: Complete cleanup after sending
         speechRecognizer.clearTranscript()
+        resetToInitialState()
+        
+        // Handle sending the message here
+        // ... your message sending logic
     }
 }
+
 
 // MARK: - Chat Input Container
 struct ChatInputContainer: View {
